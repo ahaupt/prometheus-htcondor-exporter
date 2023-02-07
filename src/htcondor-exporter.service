@@ -1,0 +1,10 @@
+[Unit]
+Description=Prometheus HTCondor Exporter Service
+After=network.target
+
+[Service]
+ExecStart=__sbindir__/htcondor-exporter-daemon
+Type=forking
+
+[Install]
+WantedBy=multi-user.target

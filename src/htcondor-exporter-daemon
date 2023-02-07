@@ -1,0 +1,26 @@
+#!/bin/bash
+
+cleanup() {
+	rm -f $tmpfile $exporterfile
+}
+
+tmpfile=$(mktemp)
+farm='interactive'
+hostname -s | grep -q '^grid-' && farm=grid
+exporter=__sbindir__/htcondor-exporter
+exporterfile=/var/lib/prometheus/node_exporter/htcondor.prom
+
+trap cleanup EXIT
+
+while [ 1 ] ; do
+	$exporter $farm > $tmpfile
+
+	while read -r -a metric ; do
+		grep -q "${metric[0]}" $tmpfile || echo "${metric[0]} 0" >> $tmpfile
+	done < <(grep -e condor_submitter_ -e condor_slot_ -e condor_job_ $exporterfile | grep -v '} 0$')
+
+	install -m 0644 $tmpfile $exporterfile
+
+	# run every 2nd minute only, as node exporter reads in the same interval
+	sleep $((120-($(date +%s)+30)%120))
+done < /dev/null > /var/log/htcondor-exporter.log 2>&1 &

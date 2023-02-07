@@ -1,0 +1,197 @@
+#!/usr/bin/perl
+
+use JSON::XS;
+
+my $cluster = shift() || 'grid';
+
+my $CLUSTER="cluster=\"$cluster\",";
+my $cmd = 'condor_status -l -any -json';
+my $q_cmd = 'condor_q -global -allusers -run -json';
+#my $cmd = 'condor_status -pool grid-htcondor.zeuthen.desy.de -l -sched -json';
+my $condor_status = decode_json(`$cmd`);
+my $condor_q = decode_json(`$q_cmd`);
+
+foreach my $entry ( @$condor_status ) {
+	scheduler($entry)		if $entry->{'MyType'} eq 'Scheduler';
+	collector($entry)		if $entry->{'MyType'} eq 'Collector';
+	negotiator($entry)		if $entry->{'MyType'} eq 'Negotiator';
+	accounting($entry)		if $entry->{'MyType'} eq 'Accounting';
+	submitter($entry)		if $entry->{'MyType'} eq 'Submitter';
+	node($entry)			if $entry->{'MyType'} eq 'Machine' && $entry->{'SlotType'} eq 'Partitionable';
+	dynamic_slot($entry)	if $entry->{'MyType'} eq 'Machine' && $entry->{'SlotType'} eq 'Dynamic';
+}
+
+foreach my $entry ( @$condor_q ) {
+	job($entry);
+}
+sub scheduler {
+	my @metrics = qw(JobsIdle NumUsers);
+	my $data = shift();
+
+	foreach my $metric ( @metrics ) {
+		my $name = sprintf "condor_sched_%s", _prometheus_metric_name($metric);
+		printf "%s{${CLUSTER}scheduler=\"%s\"} %d\n",
+			$name, $data->{'Machine'}, $data->{$metric};
+	}
+
+	my @buckets = map {lc} split(/,\s*/, $data->{'JobsRuntimesHistogramBuckets'});
+	foreach my $metric ( keys %$data ) {
+		next unless $metric =~ m|^Recent(.+)| or $metric =~ /^JobsRunn/;
+		my $metric2 = defined $data->{$1} ? $1 : '';
+		my $name = sprintf "condor_sched_%s", _prometheus_metric_name($metric);
+		my $name2 = sprintf "condor_sched_%s", _prometheus_metric_name($metric2);
+
+		if ( $data->{$metric} =~ m|,\s*| ) {
+			my @values = split(/,\s*/, $data->{$metric});
+			my @values2 = $metric2 ? split(/,\s*/, $data->{$metric2}) : ();
+			for ( my $i = 0; $i < @values; $i++ ) {
+				printf "%s{${CLUSTER}scheduler=\"%s\",histogram_bucket=\"%s\"} %d\n",
+					$name, $data->{'Machine'}, $buckets[$i], $values[$i]
+					if $buckets[$i];
+				printf "%s{${CLUSTER}scheduler=\"%s\",histogram_bucket=\"%s\"} %d\n",
+					$name2, $data->{'Machine'}, $buckets[$i], $values2[$i]
+					if $metric2 && $buckets[$i];
+
+			}
+		} else {
+			my $format = $data->{$metric} =~ /\./ ? 'f' : 'd';
+			printf "%s{${CLUSTER}scheduler=\"%s\"} %$format\n",
+				$name, $data->{'Machine'}, $data->{$metric};
+			printf "%s{${CLUSTER}scheduler=\"%s\"} %$format\n",
+				$name2, $data->{'Machine'}, $data->{$metric2}
+				if $metric2;
+		}
+	}
+}
+
+sub dynamic_slot {
+	my @metrics_dec = qw(Cpus Memory Disk GPUs);
+	my @metrics_float = qw(LoadAvg);
+	my $data = shift();
+	$data->{'Name'} =~ m|^(.+)\@(\w+)\.|;
+	my $slotname = $1 ; my $machine = $2;
+	my $universe = $data->{'JobUniverse'};
+	my $user = $data->{'RemoteUser'}; $user =~ s/\@.*//;
+	my $group = $data->{'RemoteGroup'};
+	my $vo = uc($group); $vo =~ s/\..*//;
+
+	foreach $metric ( @metrics_dec ) {
+		my $name = sprintf "condor_slot_%s", _prometheus_metric_name($metric);
+		printf "%s{${CLUSTER}name=\"%s\",node=\"%s\",universe=\"%d\",user=\"%s\",group=\"%s\",vo=\"%s\"} %d\n",
+			$name, $slotname, $machine, $universe, $user, $group, $vo, $data->{$metric};
+	}
+	foreach $metric ( @metrics_float ) {
+		my $name = sprintf "condor_slot_%s", _prometheus_metric_name($metric);
+		printf "%s{${CLUSTER}name=\"%s\",node=\"%s\",universe=\"%d\",user=\"%s\",group=\"%s\",vo=\"%s\"} %f\n",
+			$name, $slotname, $machine, $universe, $user, $group, $vo, $data->{$metric};
+	}
+}
+
+sub node {
+	my @metrics = qw(TotalCpus TotalDisk TotalMemory TotalGPUs Start NodeIsHealthy NodeIsDraining);
+	my @consumable_metrics = qw(Cpus Disk Memory GPUs);
+	my $data = shift();
+	$data->{'Name'} =~ m|^(.+)\@(\w+)\.|;
+	my $slotname = $1 ; my $machine = $2;
+
+	foreach $metric ( @metrics ) {
+		my $name = sprintf "condor_node_%s", _prometheus_metric_name($metric);
+		$name =~ s/node_node/node/;
+		printf "%s{${CLUSTER}node=\"%s\"} %d\n",
+			$name, $machine, $data->{$metric};
+	}
+	foreach $metric ( @consumable_metrics ) {
+		my $name = sprintf "condor_node_free_%s", _prometheus_metric_name($metric);
+		printf "%s{${CLUSTER}node=\"%s\"} %d\n",
+			$name, $machine, $data->{$metric};
+		$name = sprintf "condor_node_used_%s", _prometheus_metric_name($metric);
+		printf "%s{${CLUSTER}node=\"%s\"} %d\n",
+			$name, $machine, $data->{"Total$metric"}-$data->{$metric};
+	}
+}
+
+sub submitter {
+	my @metrics = qw(HeldJobs IdleJobs RunningJobs WeightedIdleJobs WeightedRunningJobs);
+	my $data = shift();
+	$data->{'Name'} =~ /(.+)\.(\w+)\@/;
+	my $group = $1; my $user = $2;
+	my $vo = uc($group); $vo =~ s/\..*//;
+
+	foreach $metric ( @metrics ) {
+		next if $data->{$metric} == 0;
+		my $name = sprintf "condor_submitter_%s", _prometheus_metric_name($metric);
+		printf "%s{${CLUSTER}submitter=\"%s\",vo=\"%s\",group=\"%s\",user=\"%s\"} %d\n",
+			$name, $data->{'Machine'}, $vo, $group, $user, $data->{$metric};
+	}
+}
+
+sub accounting {
+	my @metrics = qw(EffectiveQuota GroupSortKey Priority WeightedAccumulatedUsage WeightedResourcesUsed);
+	my $data = shift();
+
+	return if $data->{'Name'} eq '<none>';
+	return if $data->{'Name'} =~ m|\@|;
+	$data->{'Name'} =~ /(\w+)\.?/;
+	my $vo = uc($1);
+
+	foreach $metric ( @metrics ) {
+		next if $data->{$metric} == 0;
+		my $name = sprintf "condor_accounting_%s", _prometheus_metric_name($metric);
+		printf "%s{${CLUSTER}vo=\"%s\",group=\"%s\"} %f\n",
+			$name, $vo, $data->{'Name'}, $data->{$metric};
+	}
+}
+
+sub negotiator {
+        my $data = shift();
+        foreach $metric ( keys %$data ) {
+                next unless $metric =~ m|^LastNegotiationCycle.+0$|;
+                next if $data->{$metric} =~ m|[a-z]|;
+                my $name = sprintf "condor_negotiator_%s", _prometheus_metric_name($metric);
+                $name =~ s/0$//; $name =~ s/last_negotiation_cycle_//;
+                $format = $data->{$metric} =~ /\./ ? 'f' : 'd';
+                printf "%s{${CLUSTER}negotiator=\"%s\"} %$format\n",
+                        $name, $data->{'Machine'}, $data->{$metric};
+        }
+}
+
+sub collector {
+	my $data = shift();
+	foreach $metric ( keys %$data ) {
+		next unless $metric =~ m|^CurrentJobs|;
+		my $name = sprintf "condor_collector_%s", _prometheus_metric_name($metric);
+		printf "%s{${CLUSTER}collector=\"%s\"} %d\n",
+			$name, $data->{'Machine'}, $data->{$metric};
+	}
+}
+
+sub job {
+	my $data = shift();
+	my @metrics = qw(CpusProvisioned DiskProvisioned MemoryProvisioned GPUsProvisioned DiskUsage_RAW ImageSize_RAW ResidentSetSize_RAW);
+	my @metrics_float = qw(CPUsUsage GPUsAverageUsage GPUsMemoryUsage);
+
+	$data->{'AccountingGroup'} =~ /(.+)\.(\w+)/;
+	my $group = $1; my $user = $2;
+	my $vo = uc($group); $vo =~ s/\..*//;
+	$data->{'RemoteHost'} =~ /\@(.+)$/;
+	my $machine = $1;
+
+	foreach $metric ( @metrics ) {
+		next unless exists $data->{$metric};
+		my $name = sprintf "condor_job_%s", _prometheus_metric_name($metric);
+		printf "%s{${CLUSTER}job_id=\"%s\",vo=\"%s\",group=\"%s\",user=\"%s\",node=\"%s\"} %d\n",
+			$name, $data->{'GlobalJobId'}, $vo, $group, $user, $machine, $data->{$metric};
+	}
+	foreach $metric ( @metrics_float ) {
+		next unless exists $data->{$metric};
+		my $name = sprintf "condor_job_%s", _prometheus_metric_name($metric);
+		printf "%s{${CLUSTER}job_id=\"%s\",vo=\"%s\",group=\"%s\",user=\"%s\",node=\"%s\"} %f\n",
+			$name, $data->{'GlobalJobId'}, $vo, $group, $user, $machine, $data->{$metric};
+	}
+}
+
+sub _prometheus_metric_name {
+	my $name = shift();
+	$name =~ s/([a-z])([A-Z])/\1_\2/g;
+	return lc($name);
+}
