@@ -1,9 +1,9 @@
 # General
 
-Put condor_history data into database
+HTCondor exporter for Prometheus
 
 # Build RPM
 
 ```shell
-[wgs] ~/condor-accounting-desyzn % make rpm
+[wgs] ~/prometheus-htcondor-exporter % make rpm
 ```
