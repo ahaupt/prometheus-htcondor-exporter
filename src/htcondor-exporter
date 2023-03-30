@@ -88,7 +88,7 @@ sub dynamic_slot {
 }
 
 sub node {
-	my @metrics = qw(TotalCpus TotalDisk TotalMemory TotalGPUs Start NodeIsHealthy NodeIsDraining);
+	my @metrics = qw(TotalCpus TotalDisk TotalMemory TotalGPUs Start NodeIsHealthy NodeIsDraining Offline);
 	my @consumable_metrics = qw(Cpus Disk Memory GPUs);
 	my $data = shift();
 	$data->{'Name'} =~ m|^(.+)\@(\w+)\.|;
