@@ -14,12 +14,17 @@ trap cleanup EXIT
 
 while [ 1 ] ; do
 	$exporter $farm > $tmpfile
+	rc=$?
 
 	while read -r -a metric ; do
 		grep -q "${metric[0]}" $tmpfile || echo "${metric[0]} 0" >> $tmpfile
 	done < <(grep -e condor_submitter_ -e condor_slot_ -e condor_job_ $exporterfile | grep -v '} 0$')
 
-	install -m 0644 $tmpfile $exporterfile
+	filesize=$(stat -c '%s' $tmpfile)
+
+	if [ $rc -eq 0 -a $filesize -gt 0 ] ; then
+		install -m 0644 $tmpfile $exporterfile
+	fi
 
 	# run every 2nd minute only, as node exporter reads in the same interval
 	sleep $((120-($(date +%s)+30)%120))
