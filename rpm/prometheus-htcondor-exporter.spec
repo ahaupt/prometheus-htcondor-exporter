@@ -64,6 +64,8 @@ rm -rf %{buildroot}
 %attr(0644,-,-) %{_unitdir}/*
 
 %changelog
+* Mon Apr 17 2023 <andreas.haupt@desy.de> - 1.1.2-1
+- only install successfully generated metrics file
 * Thu Mar 30 2023 <andreas.haupt@desy.de> - 1.1.1-1
 - export node offline status
 * Tue Mar 15 2022 <andreas.haupt@desy.de> - 1.1-3
